@@ -56,22 +56,25 @@ Use Metro's Equity Focus Communities definition for the equity analysis rather t
 
 ## Architecture
 
-v1 is a micro-batch pipeline you can finish in two weeks; v2 adds streaming alongside it without rewriting anything. Both paths land in the same bronze layer, so every model downstream is shared.
+v1 is a micro-batch pipeline. v2 adds a streaming path that has one job: a real-time ghost-bus detector that flags trips likely missing *right now* (ADR-003). Both paths land in the same bronze layer, so every model downstream is shared. Milestone dates are in ADR-002.
 
 ```text
-Metro API (1 min) ─┐                      Swiftly (5-10 s, week 4)
-GTFS static ───────┤                               │
-                   ▼                               ▼
-            Python poller                  Redpanda + consumer
-            (cron → Airflow)               (writes Iceberg)
-                   │                               │
+Metro API (1 min) ─┐                       Swiftly (5-10 s, by Dec 15)
+Service alerts ────┤                                │
+GTFS static ───────┤                                ▼
+                   ▼                       Redpanda (7-day replay)
+            Python poller                  ├─► bronze archiver
+            (cron → Airflow)               ├─► ghost detector ◄── today's trips
+                   │                       │   (timers, event time)  (dim_schedule_trips)
+                   │                       └─► live metrics
+                   │                                │
                    └──────────► Bronze: raw snapshots on S3 ◄──┘
                                 (append-only, content-hash keys)
                                         │
                                         ▼
-                         Silver (dbt) ──► Gold (dbt)
-                                          │        │
-                               Dashboard ◄┘        └► Alerts + runbook
+               Silver (dbt) ──► Gold (dbt) ◄── fct_ghost_alerts (scored nightly)
+               + alert causes (LLM, cached)   │        │
+                               Dashboard ◄────┘        └► Alerts + runbook
         Airflow orchestrates · Terraform defines AWS · CI on every PR
 ```
 
@@ -80,15 +83,16 @@ The census join and Metro's Equity Focus Communities map enter at the gold layer
 | Component | Choice | Why | Rejected and why |
 | --- | --- | --- | --- |
 | Language | Python 3.12, uv | Industry default for DE; uv for fast, locked installs | Poetry: slower, no real advantage here |
-| Raw storage | S3 (Iceberg from week 4) | Cheap, durable; Iceberg adds schema evolution and time travel | Postgres for raw: expensive to keep months of snapshots |
+| Raw storage | S3; Iceberg only when a measured problem calls for it (ADR-002, decision 5) | Cheap, durable; Iceberg adds schema evolution and atomic commits, at the cost of running a catalog | Postgres for raw: expensive to keep months of snapshots |
 | Query engine | DuckDB | Free, fast on a laptop, reads S3 and Iceberg directly | Snowflake: costs money; mention it as the scale-up path in a decision record |
 | Transformations | dbt | The most requested DE tool in postings; tests and lineage built in | Raw SQL scripts: no tests, no lineage |
-| Orchestration | Airflow | Most common orchestrator in job postings; adopted in week 3, once cron's lack of retries and backfills hurts | Dagster: arguably nicer, but fewer postings name it |
-| Streaming | Redpanda | Kafka-compatible API, one binary, light on memory | Kafka itself: heavier to run for one person |
+| Orchestration | Airflow | Most common orchestrator in job postings; adopted by Nov 30, once cron's lack of retries and backfills hurts | Dagster: arguably nicer, but fewer postings name it |
+| Streaming | Redpanda + a plain Python stateful consumer | Needed by the ghost detector: absence detection with timers, event-time watermarks, 7-day replay for backtesting, one ingest feeding several consumers (ADR-003). Must beat a micro-batch baseline | Kafka: heavier to run. Flink: a JVM that doesn't fit the VM. Streaming into Iceberg with no requirement: resume-driven |
+| LLM extraction | Claude API, structured outputs, Batch API | Turns service-alert text into cause categories; results cached by content hash; shipped only after passing an eval (ADR-002, decision 6) | Regex rules: brittle on free text, kept as the eval baseline |
 | Dashboard | Evidence or Streamlit | SQL-native, free hosting options | Tableau: not code, can't be reviewed in a PR |
 | Infrastructure | Terraform + GitHub Actions | Reproducible environments; CI on every PR | Console clicks: not reproducible |
 
-Target cost: about $30 a month, with a billing alarm at $40. Airflow and Redpanda together need roughly 4 GB of memory, so one small VM with 4 GB runs the poller, Airflow, and Redpanda, and S3 holds the data. Price the instance in the AWS pricing calculator during week 1 and record the real number in a decision record.
+Target cost: about $30 a month on AWS, with a billing alarm at $40, plus Anthropic API spend under a separate monthly cap set in the Console (ADR-002, decision 6). One small VM with 4 GB runs the poller, Airflow, and Redpanda, and S3 holds the data. That memory is tight: Airflow alone needs 2 to 3 GB, so run Redpanda at `--smp 1 --memory 1G`, measure, and ask before moving to a larger instance. Price the instance in the AWS pricing calculator by Nov 14 and record the real number in a decision record.
 
 ## Data model
 
@@ -116,6 +120,7 @@ The fetch log is what makes "unknown" possible: without a record of failed fetch
 | dim_schedule_trips | trip × service date | Includes `block_id` (the chain of trips one bus runs) and handles times past 24:00; versioned so each date uses the schedule in force that day (SCD Type 2) |
 | dim_stops, dim_routes, dim_shapes | entity × schedule version | Versioned like trips |
 | int_trip_observations | scheduled trip × service date | First and last seen, furthest stop reached, vehicle IDs, match method and confidence |
+| stg_alert_causes | service alert × prompt version | Cause category, affected lines, time window; extracted by an LLM, cached on `(content_hash, prompt_version, model)` (ADR-002, decision 6) |
 
 **Gold (answers).** What the dashboard, dataset, and findings read.
 
@@ -124,6 +129,8 @@ The fetch log is what makes "unknown" possible: without a record of failed fetch
 | fct_trip_outcomes | scheduled trip × service date | Outcome (see methodology), announced in advance or not, how it was matched |
 | fct_missed_rate_daily | route × direction × hour × day | Missed-trip rate, announced rate, unplanned rate, each with an interval |
 | fct_feed_health | feed × 5 minutes | Freshness lag, record counts, fetch error rate, healthy flag |
+| fct_slo_monthly | SLO × month | Target, achieved, error budget used (ADR-002, decision 3) |
+| fct_ghost_alerts | trip × service date × detector version × event | Real-time flag and retraction events, scored nightly against `fct_trip_outcomes` for precision, recall, and latency (ADR-003) |
 | fct_reconciliation_monthly | route × month | Your canceled rate against Metro's monthly report, and the difference |
 | fct_equity_by_line | route × month | Lost service against the line's share of miles in Equity Focus Communities |
 | fct_service_by_tract | census tract × month | Missed trips at the tract's stops, joined to ACS income and car ownership; feeds the neighborhood view on the dashboard |
@@ -183,11 +190,13 @@ Every job must be safe to run twice, safe to run late, and safe to run for any p
 
 **Late and out-of-order data.** Partition by service date, not arrival time. A service date stays open until 3 hours after its last scheduled trip ends; then its gold rows are finalized. Later arrivals still land in bronze and are flagged.
 
-**Schedule changes.** Each new GTFS ZIP becomes a new schedule version with valid-from and valid-to dates; old versions are never overwritten. Metro has historically changed service in June and December, so a service change may land during the project. Confirm the date in week 1; it is the best possible live test of your versioning.
+**Schedule changes.** Each new GTFS ZIP becomes a new schedule version with valid-from and valid-to dates; old versions are never overwritten. Metro has historically changed service in June and December, so a service change may land during the project. Confirm the date by Nov 14; it is the best possible live test of your versioning.
 
 **Schema drift.** Metro's API is in beta. Fingerprint each response's field names and types; on any change, keep landing raw data, alert, and pause downstream models for that feed until a person approves the new shape.
 
 **Watching the watcher.** The poller pings an external heartbeat service on every successful fetch. If the VM itself dies, your in-pipeline alerts die with it; the external check doesn't.
+
+**Service-level objectives.** Reliability is measured, not asserted (ADR-002, decision 3): feed freshness and cancellation capture at 99.5% of minutes per month, trip match rate at 95% or more per day, and dashboard data under 15 minutes old 99% of the time. When a month's 216-minute error budget is spent, feature work stops until the cause is fixed. Every incident gets a blameless postmortem in `docs/incidents/` (ADR-002, decision 4).
 
 **Tests (minimum set):**
 
@@ -197,34 +206,29 @@ Every job must be safe to run twice, safe to run late, and safe to run for any p
 - Edge cases in unit tests: trips past 24:00, the March 2027 daylight-saving change, a trip ID that changes at a service change, a duplicate snapshot, an empty feed response
 - Freshness: alert if bronze receives no snapshot for 5 minutes
 - Volume: alert if vehicles in service fall outside the baseline for that hour and weekday
+- Streaming: replaying the same offsets twice produces identical `fct_ghost_alerts`; a timer fires for a trip with no events at all
 - All tests run offline against recorded fixtures: real snapshots saved once and committed to the repo
 
 **Alerting and runbook.** Alerts go to Discord or email, and each links to a runbook entry: what it means, how to check, how to recover.
 
-## Six-week plan
+## Plan
 
-At 50 to 60 hours a week, a live public link lands at the end of week 2 and an interview-ready system at week 6. Archiving starts on day 2, before anything else works: the canceled-service feed only shows current cancellations, so every day not archived is history lost for good.
+Milestones are dated, not weekly, because the hard constraints are calendar-bound: recruiting season is now, the first full month of data is December, and Metro sets the service-change date (ADR-002, decision 1). Building goes fast with Claude Code. **Findings are gated on data accruing, not on effort.** Archiving starts first: the canceled-service feed shows only current cancellations, so every day not archived is history lost for good.
 
-**Week 1, day by day:**
-
-1. Day 1: Hit every endpoint by hand and save one response from each. Create the AWS account with a billing alarm. Set up the repo, Docker, and a first decision record.
-2. Day 2: Poller running 24/7, writing all realtime feeds and the fetch log to S3, with the external heartbeat. Nothing else matters until this works.
-3. Day 3: Load GTFS static into DuckDB. Download the archived schedule versions you'll need.
-4. Days 4 and 5: SQL by hand. Expand one day's schedule, handle times past 24:00, and count trips per route.
-5. Days 6 and 7: Record test fixtures, set up the CI skeleton, and write up what surprised you about the data.
-
-| Week | Build | Done when | Chaos drill | Learning track |
+| By | Build | Done when | Chaos drill | Learning track |
 | --- | --- | --- | --- | --- |
-| 1 | See the day-by-day list above | Archive running 24/7; you can answer "how many trips did line 754 schedule yesterday?" in SQL | Kill the poller for an hour; confirm the gap shows in the fetch log | SQL: joins, GROUP BY, CTEs. DDIA ch. 3 |
-| 2 | dbt bronze to silver to gold. Matching v1 on trip_id. Ran, missed, and unknown outcomes. Nightly compaction. Cron runs dbt every 10 minutes. Dashboard v1 | **Public link live** with missed-trip rates by line for the past week | Run the same day twice; output identical | SQL: window functions. dbt incremental models |
-| 3 | Airflow replaces cron, with retries and a backfill DAG. Block inference, partial trips, schedule versioning, schema-drift detection, all tests and alerts. First reconciliation against Metro's monthly report | Reconciliation test passes daily; one-command backfill works | Load a day twice, drop a feed for 6 hours, swap in a new schedule mid-week | DDIA ch. 5 and 11. Kimball ch. 1 to 3 |
-| 4 | Swiftly feed into Redpanda, consumer writing Iceberg. Fuzzy matching. Stop-coverage refinement | Streaming path stable for 72 hours; both paths agree on daily outcomes | Kill the consumer mid-batch; prove no duplicates, no loss | DDIA ch. 10 and 11 |
-| 5 | Terraform for all AWS resources. Cost tracking. Equity analysis. Cluster-bootstrap intervals. Hand-validate 50 trips. Threshold sensitivity | Three findings written up with method and validation | Destroy and rebuild the stack from Terraform in under 30 minutes | Bootstrap methods. Terraform basics |
-| 6 | Public dataset release: Parquet, data dictionary, method notes, credit to LA Metro per its terms. README, diagram, runbook, launch post. Pitch two advocacy groups or reporters | Mock deep-dive interview passed cold | Explain any part of the system without notes | Questions you must answer cold, below |
+| Nov 14 | Poller 24/7 on one VM (Metro realtime, canceled service, service alerts, fetch log, external heartbeat). GTFS static in DuckDB. Owner writes schedule expansion SQL by hand. Request the Swiftly key. Confirm the service-change date | Archive running 24/7; you can answer "how many trips did line 754 schedule yesterday?" in SQL | Kill the poller for an hour; confirm the gap shows in the fetch log | SQL: joins, GROUP BY, CTEs. DDIA ch. 3 |
+| Nov 21 | dbt bronze to silver to gold. Matching v1 through the crosswalk. Ran, missed, and unknown outcomes. Nightly compaction. Cron runs dbt every 10 minutes. Dashboard v1. README v1. SLO measurement starts | **Public link live.** Resume line exists; start applying | Run the same day twice; output identical | SQL: window functions. dbt incremental models |
+| Nov 30 | Airflow replaces cron, with retries and a backfill DAG. Block inference, partial trips, schedule versioning, schema-drift detection, all tests, alerts, runbook. SLO tile. Baseline real-time detector as a 1-minute micro-batch (ADR-003) | One-command backfill works; SLOs reported daily; baseline detector precision measured | Load a day twice, drop a feed for 6 hours, swap in a new schedule mid-week | DDIA ch. 5 and 11. Kimball ch. 1 to 3 |
+| Dec 15 | Swiftly into Redpanda: bronze archiver plus stateful ghost detector (ADR-003). LLM alert-cause extraction with eval, if alert text exists (ADR-002, decision 6). Fuzzy matching. Iceberg only if an ADR-002 decision 5 trigger is hit | ADR-003 acceptance criteria met; extractor passes its eval bar | Kill the consumer mid-batch; prove no duplicate or lost alerts. Replay 7 days through a new detector version and score it | DDIA ch. 10 and 11. Event time, watermarks, timers |
+| Mid-Dec | Metro service change goes live (confirm the date) | Prior-month numbers unchanged; new trip IDs matched | The change itself | — |
+| Jan 15 | December reconciliation against Metro's report. Cluster-bootstrap intervals over about 60 days. Equity analysis. Hand-validate 50 trips. Threshold sensitivity. Dataset release on S3 and Hugging Face. README, diagram, launch post. Pitch two advocacy groups or reporters | Three findings with method and validation; mock deep-dive interview passed cold | Destroy and rebuild the stack from Terraform in under 30 minutes (bronze bucket excluded by `prevent_destroy`) | Bootstrap methods. Questions you must answer cold, below |
 
-**Order matters.** Weeks 1 and 2 use the simplest tools (cron, DuckDB) so you feel why Airflow, Iceberg, and Redpanda exist before adopting them. Write a decision record at each upgrade.
+**Order matters.** Early milestones use the simplest tools (cron, DuckDB) so you feel why Airflow and Redpanda exist before adopting them. Every new tool gets a decision record, and Iceberg arrives only on evidence.
 
-**If time slips** (finals, work), cut in this order: shape projection, then fuzzy matching, then the equity analysis. Never cut week 3; reliability is what interviewers test, and never stop the poller.
+**Agent-written code merges only after you explain it back** (ADR-002, decision 2). Answer the cold questions weekly, without notes.
+
+**If time slips** (finals, work), cut in this order: shape projection, fuzzy matching, the equity analysis, then LLM extraction. If streaming is cut, the detector runs on its baseline. Never cut the Nov 30 milestone; reliability is what interviewers test, and never stop the poller.
 
 ## Definition of done and engineering standards
 
@@ -254,11 +258,13 @@ Every answer lives in a section above. If you can't answer one without notes, th
 3. Why partition by service date instead of arrival time? Where does a trip at 25:10 go?
 4. Metro changed the schedule mid-month. How are last month's numbers still correct?
 5. You fixed a bug in trip matching. How do you recompute six weeks of history, and how long does it take?
-6. Why Iceberg over plain Parquet files? What would break if you kept only micro-batching?
+6. Why does the ghost detector need streaming, when a poller every 10 seconds is just as fast? What did the micro-batch baseline measure? And did you adopt Iceberg, and what problem made you (or didn't)?
 7. The stream consumer crashes mid-batch. Do you get duplicates or loss? What does "exactly once" actually mean in your system?
 8. Why is a Wilson interval wrong here, and what does the cluster bootstrap fix?
 9. Your rate disagrees with Metro's monthly report by 3 points on one line. Walk me through debugging it.
 10. This now has to cover 50 agencies. What breaks first, and what would you change?
+11. LLM output isn't deterministic. How is the alert-cause job still idempotent, how do you know the extractor is accurate, and what does it cost per month?
+12. Show me your worst incident. What was the root cause, and what did you change so it can't recur?
 
 ## Risks and open questions
 
@@ -269,15 +275,22 @@ Every answer lives in a section above. If you can't answer one without notes, th
 | Trip IDs change at service changes | High | Versioned schedules; match against the version in force |
 | Untracked buses inflate missed counts | High | Block inference, hand validation, stated as a limitation |
 | Metro's monthly report counts something different from your metric | Medium | Find its definition before comparing; reconcile on matching scope |
-| Streaming eats too much time | Medium | v1 runs on micro-batches; streaming is additive, not a rewrite |
+| Streaming eats too much time | Medium | v1 runs on micro-batches; streaming is additive, not a rewrite; the baseline detector ships regardless (ADR-003) |
+| Streaming doesn't beat the baseline | Medium | A legitimate result: record it in an ADR with the numbers (ADR-003) |
+| Swiftly key arrives late | Medium | Request it by Nov 14; the baseline detector runs on the Metro API meanwhile |
+| Airflow and Redpanda don't fit in 4 GB | Medium | Redpanda at 1 GB; measure; ask before a larger instance |
+| Agent-written code the owner can't defend | Medium | Explain-back merge gate (ADR-002, decision 2) |
+| LLM spend creeps up | Low | Content-hash cache, Batch API, Anthropic Console spend cap |
 | Cloud bill creeps up | Low | Billing alarm at $40 in Terraform |
-| Finals and work compress the schedule | High | Cut list in the six-week plan |
+| Finals and work compress the schedule | High | Cut list in the plan |
 
-**Open questions to settle in week 1:**
+**Open questions to settle by Nov 14:**
 
 - The exact realtime endpoint URLs and formats live today, and whether the Metro API and Swiftly feeds match
 - Whether canceled-service entries use the same trip IDs as GTFS static
 - What Metro's monthly cancellation report counts, and whether past months are available
 - The date of the next bus service change
+- Whether Metro publishes service-alert text, and how many unique alerts appear per day (gates ADR-002, decision 6, and its cost)
+- How long Swiftly takes to issue an API key (gates the Dec 15 streaming milestone)
 
 **Sources:** [Metro API](https://api.metro.net) · [Metro API guide](https://lacmta.github.io/metro-api-v2/docs/intro) · [Metro developer page, mirrored](https://backiee.wasmer.app/https_developer_metro_net/api) · [Metro bus cancellation report](https://www.metro.net/riding/nextrip/) · [LA Metro bus GTFS](https://gitlab.com/LACMTA/gtfs_bus) · [Metro GTFS notes](https://lacmta.github.io/gtfs-bus) · [Mobility Database](https://mobilitydatabase.org/feeds/gtfs/mdb-29) · [Transitland archive](https://transit.land/feeds/f-9q5-metro~losangeles) · [Metro board report, Feb 2026](https://datamade-metro-pdf-merger.s3.amazonaws.com/2026-0066.pdf) · [TransitCenter on ghost buses](https://transitcenter.org/ghost-buses-are-haunting-riders-across-america/) · [King County ghost-bus legislation](https://kingcounty.gov/es-es/dept/council/governance-leadership/county-council/newsroom/2025/03-04-balducci-baron-perry-ghost-bus-passage-release)
