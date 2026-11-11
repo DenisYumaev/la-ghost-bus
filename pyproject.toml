@@ -1,0 +1,40 @@
+[project]
+name = "la-ghost-bus"
+version = "0.1.0"
+description = "Measures how much scheduled LA Metro bus service never runs."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "pytest-socket>=0.8.1",
+    "ruff>=0.17.4",
+]
+
+[tool.uv]
+# This is an application, not a library: nothing gets built or published.
+# uv installs only the dependencies, and tests import from the repo root.
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I isort, UP pyupgrade, B bugbear,
+# SIM simplify, DTZ naive-datetime checks (hard rule 5: times are UTC).
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "DTZ"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# Hard rule 7: tests run offline. pytest-socket makes any network call fail the test.
+addopts = "--disable-socket --strict-markers"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["ingest", "tests"]

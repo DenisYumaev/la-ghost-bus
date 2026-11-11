@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+budget_alert_email = "you@example.com"
+
+# Optional overrides:
+# aws_profile        = "default"
+# aws_region         = "us-west-2"
+# monthly_budget_usd = 40

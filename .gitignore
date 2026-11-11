@@ -1,0 +1,42 @@
+# --- Secrets: never committed (CLAUDE.md hard rule 4) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+credentials
+
+# --- Terraform ---
+# State holds resource IDs and sometimes secrets in plain text.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+# tfvars hold per-machine values (alert email); commit only the .example.
+*.tfvars
+!*.tfvars.example
+# .terraform.lock.hcl IS committed: it pins provider versions, like uv.lock.
+
+# --- Fixtures ---
+# Git cannot ignore by file size. Known-large files are listed here, and
+# scripts/check_fixture_sizes.sh fails `make lint` and CI on any other
+# fixture over 1 MB.
+tests/fixtures/**/*.zip
+# The probe used to write here; guard against an old copy being committed.
+/fixtures/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- OS / editors ---
+.DS_Store
+.idea/
+.vscode/

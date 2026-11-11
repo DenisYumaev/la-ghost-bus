@@ -1,0 +1,13 @@
+services:
+  poller:
+    build: .
+    image: la-ghost-bus/poller:dev
+    # Archiving must survive crashes and Docker restarts (SPEC: never stop the poller).
+    restart: unless-stopped
+    # Small init process as PID 1 so `docker compose down` stops the poller at once.
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: UTC
