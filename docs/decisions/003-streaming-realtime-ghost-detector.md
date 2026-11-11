@@ -26,7 +26,7 @@ Latency alone does **not** justify a log. A poller hitting Swiftly every 10 seco
 | Requirement | Why batch is a poor fit |
 | --- | --- |
 | **R1. Detecting an absence needs timers.** A flag must fire at the deadline even when *no event arrives*. | Batch jobs react to data they read; an absence produces no data. A stateful consumer with event-time timers and a watermark expresses "nothing happened by T" directly. This is the core streaming problem in the project. |
-| **R2. Event time, not arrival time.** Vehicle timestamps lag and arrive out of order. | The detector keys on vehicle timestamps, with a watermark (initially 2 minutes) for late events. Late events that clear a flag produce a retraction, not a silent overwrite. |
+| **R2. Event time, not arrival time.** Vehicle timestamps lag and arrive out of order. | Sightings are assigned to trips by vehicle timestamp, not arrival time. A late sighting that clears a flag produces a retraction, not a silent overwrite. |
 | **R3. Replay for backtesting.** Changing the grace period or matching rule must be testable against real history before it goes live. | Redpanda retains 7 days. A new detector version replays that window and is scored against final outcomes (below). Re-running against a poller isn't possible, because a poller has no history. |
 | **R4. One ingest, several consumers.** Swiftly is polled once (one API key, one rate limit). | The topic feeds the bronze archiver, the detector, and live metrics independently. Each can crash, restart, or be replaced without touching the others, or the ingest. |
 
@@ -56,7 +56,8 @@ Swiftly (5-10 s) ─► poller ─► Redpanda topic: vehicle_positions (7-day r
 ```
 
 - **The expected side comes from batch.** Today's trips come from `dim_schedule_trips`, loaded at service-day start and refreshed when the schedule version changes. The stream supplies only what was observed. Joining a stream to a table is the pattern used in production streaming systems.
-- **Trips are matched through the crosswalk** (ADR-001 decision 4), never on raw `trip_id`.
+- **Two clocks, deliberately.** A flag fires on **processing time**, at the deadline (start + grace), so riders see it fast. A flag becomes **final** only when the **event-time watermark** (newest vehicle timestamp minus an allowed lateness of 2 minutes) passes the deadline. Until then, a late sighting can retract it; after that, late sightings are logged but don't retract. Firing on the watermark instead would make every flag at least 2 minutes late. The retraction rate measures what fast flags cost in accuracy.
+- **Trips are matched through the crosswalk** (ADR-001 decision 4), never on raw `trip_id`. The crosswalk's fallback (route, direction, start time within ±10 minutes) runs inside the consumer, because Swiftly's trip IDs may not match GTFS. This is unverified until the key arrives.
 - **Delivery is effectively once:** at-least-once delivery plus an idempotent sink. The consumer commits offsets only after the sink write. Alert rows are keyed on `(trip_id, service_date, detector_version, event_type)`, so a replayed or duplicated write is a no-op.
 - **State is derived, the log is the source of truth.** On restart the detector rebuilds state by replaying from the start of the service day. There's no separate state store to back up or corrupt.
 - **The bronze archiver writes raw Swiftly responses** using ADR-001 decision 6's layout and hashing. Redpanda is a buffer, never the archive: bronze stays on S3, append-only.
@@ -67,17 +68,17 @@ Swiftly (5-10 s) ─► poller ─► Redpanda topic: vehicle_positions (7-day r
 
 Every flag is scored once its service day is finalized in `fct_trip_outcomes`:
 
-- **Precision:** the share of flags whose trip ended `missed` or `unknown`, rather than `ran` or `partial`.
+- **Precision:** flags whose trip ended `missed`, divided by flags whose trip ended `missed`, `ran`, or `partial`. Flags on trips that ended `unknown` (feed unhealthy) or `likely ran, untracked` are left out and reported separately. This matches the spec's missed-rate formula, which also leaves out `unknown`. Counting unknowns as hits would inflate the number.
 - **Recall:** the share of missed trips flagged within 15 minutes of their scheduled start.
-- **Detection latency:** the time from the deadline (start + grace) to when the flag was emitted.
-- **Retraction rate:** the share of flags later withdrawn.
+- **Detection latency:** the time from the deadline (start + grace) to when the flag was emitted. Measured on processing time; see "two clocks" above.
+- **Retraction rate:** the share of flags later withdrawn, split into before and after finalization.
 
 These are published on the dashboard per detector version.
 
 **Acceptance criteria (all required before streaming counts as done):**
 
 1. p95 detection latency of 30 seconds or less, against the baseline's measured value
-2. Precision of at least 0.8 at the chosen grace period, measured over 7 or more service days
+2. Precision of at least 0.8 at the chosen grace period, measured over 7 or more service days, with the retraction rate reported next to it
 3. Killing the consumer mid-batch causes no duplicate or lost alerts; this is the chaos drill
 4. A 7-day replay through a new detector version is scored end to end
 5. 72 hours stable alongside the batch path, with both agreeing on daily outcomes
@@ -94,6 +95,8 @@ These are published on the dashboard per detector version.
 ## Consequences
 
 - **Request a Swiftly API key this week.** ADR-001 notes approval may take days, and the streaming milestone is Dec 15.
+- **Disk and storage volume must be measured before building.** At an assumed 0.5 MB per full Swiftly snapshot every 10 seconds, that's about 4 GB a day: about 30 GB of Redpanda disk for 7 days, and about 130 GB a month if every snapshot is archived. Retention is capped by size as well as time, and the Swiftly archive rate is decided with real numbers in ADR-004's cost model.
+- **Check Swiftly's terms** for archiving and redistribution before any Swiftly-derived data is published.
 - **Memory is tight.** Redpanda runs with `--smp 1 --memory 1G`. Measure Airflow, Redpanda, and the poller together on the VM; if they don't fit in 4 GB, ask before moving to a larger instance (CLAUDE.md hard rule 3).
 - **New gold table:** `fct_ghost_alerts`, plus a nightly scoring model and a dashboard tile.
 - **The dashboard gains a live element,** which gives the public link a reason to be visited more than once.

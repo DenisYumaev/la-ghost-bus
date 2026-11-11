@@ -46,18 +46,24 @@ Weekly, the owner answers the spec's "questions you must answer cold" without no
 
 ## Decision 3: Service-level objectives with an error budget
 
+SLOs cover only what this system controls. If an SLO could be breached by Metro alone, the error-budget policy below would demand fixes nobody here can make.
+
 | SLO | Target | Measured as |
 | --- | --- | --- |
-| Feed freshness | 99.5% of minutes, per realtime feed, per calendar month | Minutes with a successful fetch whose header timestamp is under 3 minutes old (the spec's "healthy") |
-| Cancellation capture | 99.5% of minutes, per month | Minutes with a successful canceled-service fetch |
+| Capture | 99.5% of minutes, per feed (realtime and canceled service), per calendar month | Minutes in which a fetch was attempted and its outcome recorded, and on success its bytes landed in bronze. An HTTP 5xx from Metro that was attempted and logged counts as *captured*; a minute with no attempt (poller down, VM dead) does not |
 | Trip match rate | 95% or more per day, per source | Matched observations over all observations (ADR-001 decision 4) |
 | Dashboard freshness | Gold data under 15 minutes old, 99% of the time | Age of the newest gold partition when sampled |
+
+**Source health, tracked but not an SLO.** Metro's own freshness (the share of minutes with a header timestamp under 3 minutes old, the spec's "healthy") and Metro's error rate are shown on the dashboard next to the SLOs. They drive the `unknown` outcome, but a stale Metro feed doesn't spend the error budget. The fetch log is what tells the two apart: it shows "we asked and Metro failed" versus "we never asked."
 
 **Error budget:** 0.5% of a 30-day month is 216 minutes. If a month's budget is spent, feature work stops until the cause is fixed and a postmortem is written (decision 4).
 
 **Why.** "It runs continuously" is a claim; "it met a 99.5% freshness SLO for 90 days" is evidence. SLOs also make the fetch log useful as a metric, and the budget policy is how real teams trade reliability against features.
 
-**Alternatives considered:** alerts without SLOs (they say something broke, not whether the system is reliable), or a 99.9% target (43 minutes a month, unrealistic for one VM without redundancy).
+**Alternatives considered:**
+- Alerts without SLOs: they say something broke, not whether the system is reliable.
+- A 99.9% target: 43 minutes a month, unrealistic for one VM without redundancy.
+- Counting Metro's freshness as an SLO: it measures the source, not the system, and the budget policy couldn't act on it.
 
 ## Decision 4: Incident log with blameless postmortems
 
@@ -125,3 +131,4 @@ The probe measures the real unique-alert volume before the model is chosen. Hash
 - CLAUDE.md gains the explain-back rule and updated tool arrival dates.
 - New files: `docs/incidents/` (template), and later `fct_ghost_alerts` (ADR-003) and `stg_alert_causes` (decision 6).
 - Open questions for the probe: does alert text exist, and how many unique alerts are there per day?
+- Before the January release, confirm that LA Metro's data terms (and Swiftly's, for anything derived from it) allow a public archive and redistribution, including on Hugging Face.

@@ -107,6 +107,8 @@ Three layers, and only bronze is precious: everything downstream must be rebuild
 | raw_trip_updates | One feed snapshot | same as above |
 | raw_cancellations | One API response | fetched_at, payload, content_hash, schema_fingerprint |
 | raw_gtfs_static | One schedule ZIP | downloaded_at, feed_version, file_hash |
+| raw_service_alerts | One API response | fetched_at, payload, content_hash, schema_fingerprint (feeds `stg_alert_causes`, ADR-002 decision 6) |
+| raw_swiftly_vehicle_positions | One Swiftly snapshot | fetched_at, feed_header_timestamp, payload, content_hash (written by the stream archiver, ADR-003) |
 
 The fetch log is what makes "unknown" possible: without a record of failed fetches, you can't tell an outage from a quiet feed.
 
@@ -196,7 +198,7 @@ Every job must be safe to run twice, safe to run late, and safe to run for any p
 
 **Watching the watcher.** The poller pings an external heartbeat service on every successful fetch. If the VM itself dies, your in-pipeline alerts die with it; the external check doesn't.
 
-**Service-level objectives.** Reliability is measured, not asserted (ADR-002, decision 3): feed freshness and cancellation capture at 99.5% of minutes per month, trip match rate at 95% or more per day, and dashboard data under 15 minutes old 99% of the time. When a month's 216-minute error budget is spent, feature work stops until the cause is fixed. Every incident gets a blameless postmortem in `docs/incidents/` (ADR-002, decision 4).
+**Service-level objectives.** Reliability is measured, not asserted (ADR-002, decision 3). SLOs cover only what this system controls: capture (a fetch attempted and recorded, and landed in bronze on success) at 99.5% of minutes per feed per month, trip match rate at 95% or more per day, and dashboard data under 15 minutes old 99% of the time. Metro's own feed freshness is tracked as source health, not as an SLO; the fetch log separates "Metro failed" from "we never asked." When a month's 216-minute error budget is spent, feature work stops until the cause is fixed. Every incident gets a blameless postmortem in `docs/incidents/` (ADR-002, decision 4).
 
 **Tests (minimum set):**
 
@@ -292,5 +294,6 @@ Every answer lives in a section above. If you can't answer one without notes, th
 - The date of the next bus service change
 - Whether Metro publishes service-alert text, and how many unique alerts appear per day (gates ADR-002, decision 6, and its cost)
 - How long Swiftly takes to issue an API key (gates the Dec 15 streaming milestone)
+- Whether LA Metro's and Swiftly's terms allow a public archive and redistribution, including on Hugging Face (check before the January release)
 
 **Sources:** [Metro API](https://api.metro.net) · [Metro API guide](https://lacmta.github.io/metro-api-v2/docs/intro) · [Metro developer page, mirrored](https://backiee.wasmer.app/https_developer_metro_net/api) · [Metro bus cancellation report](https://www.metro.net/riding/nextrip/) · [LA Metro bus GTFS](https://gitlab.com/LACMTA/gtfs_bus) · [Metro GTFS notes](https://lacmta.github.io/gtfs-bus) · [Mobility Database](https://mobilitydatabase.org/feeds/gtfs/mdb-29) · [Transitland archive](https://transit.land/feeds/f-9q5-metro~losangeles) · [Metro board report, Feb 2026](https://datamade-metro-pdf-merger.s3.amazonaws.com/2026-0066.pdf) · [TransitCenter on ghost buses](https://transitcenter.org/ghost-buses-are-haunting-riders-across-america/) · [King County ghost-bus legislation](https://kingcounty.gov/es-es/dept/council/governance-leadership/county-council/newsroom/2025/03-04-balducci-baron-perry-ghost-bus-passage-release)
