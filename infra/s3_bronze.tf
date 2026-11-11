@@ -55,8 +55,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "bronze" {
   }
 }
 
-# Reject any request not made over TLS.
-data "aws_iam_policy_document" "bronze_tls_only" {
+data "aws_iam_policy_document" "bronze" {
+  # Reject any request not made over TLS.
   statement {
     sid     = "DenyInsecureTransport"
     effect  = "Deny"
@@ -77,11 +77,30 @@ data "aws_iam_policy_document" "bronze_tls_only" {
       values   = ["false"]
     }
   }
+
+  # Bronze is sacred (CLAUDE.md hard rule 1, ADR-004 decision 4): nobody can
+  # delete raw objects or their old versions. This guards against bugs and
+  # mistakes; removing it takes a deliberate, reviewed policy change.
+  # derived/ and selftest/ are deliberately not covered: they are rebuildable.
+  statement {
+    sid    = "DenyBronzeDeletes"
+    effect = "Deny"
+    actions = [
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+    ]
+    resources = ["${aws_s3_bucket.bronze.arn}/bronze/*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "bronze" {
   bucket = aws_s3_bucket.bronze.id
-  policy = data.aws_iam_policy_document.bronze_tls_only.json
+  policy = data.aws_iam_policy_document.bronze.json
 
   # Policy must be applied after the public access block exists.
   depends_on = [aws_s3_bucket_public_access_block.bronze]
