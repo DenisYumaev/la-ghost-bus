@@ -15,11 +15,12 @@ So:
 - **Explain each non-trivial choice in one or two sentences as you make it**, including the main alternative you rejected.
 - **Do not write the core logic unless asked.** The owner writes these by hand: the dbt SQL models for trip matching and outcome classification, the missed-trip rules, and the statistics (cluster bootstrap). Scaffold the files, write tests that pin the expected behavior, and leave the implementation as a clearly marked TODO. Boilerplate (Docker, Terraform, CI, config, the poller's HTTP and storage plumbing) is yours to write.
 - **When the owner asks you to review their code**, review like a staff engineer: correctness, failure modes, idempotency, naming, tests. Point out problems; don't silently rewrite.
+- **Explain-back before merge (ADR-002, decision 2).** Before any PR with code you wrote merges, ask the owner what it does, why that approach, and what would break it. If they can't answer, explain or rework until they can. Don't merge on their behalf until they have.
 
 ## Hard rules
 
 1. **Bronze is sacred.** Never write code that modifies or deletes files in the bronze layer. Raw responses are stored byte-for-byte (ADR-001, decision 2).
-2. **Every job must be idempotent.** Running anything twice must produce the same result. Bronze writes are keyed on content hash; silver and gold overwrite whole service-date partitions.
+2. **Every job must be idempotent.** Running anything twice must produce the same result. Bronze writes are keyed on content hash; silver and gold overwrite whole service-date partitions. LLM calls are made idempotent by storing results keyed on `(content_hash, prompt_version, model)` and reusing them (ADR-002, decision 6). Streaming sinks are idempotent on their natural key (ADR-003).
 3. **Terraform: always show `terraform plan` and wait for explicit approval before `apply` or `destroy`.** Never add NAT gateways, more than one EC2 instance, or instance types larger than t4g.medium without asking. The bronze S3 bucket must have `prevent_destroy` and versioning on.
 4. **AWS credentials:** use the configured AWS profile. Never create IAM users or access keys, never print credentials, never commit `*.tfstate`, `.env`, or keys.
 5. **Times are stored in UTC.** Service dates follow the GTFS rule in `America/Los_Angeles`; times can exceed 24:00 (ADR-001, decision 5).
@@ -29,20 +30,20 @@ So:
 
 ## Stack
 
-Python 3.12 with uv · ruff · pytest · DuckDB · dbt (dbt-duckdb) · Docker Compose · Terraform · GitHub Actions. Airflow arrives in week 3, Redpanda and Iceberg in week 4. Don't add them earlier.
+Python 3.12 with uv · ruff · pytest · DuckDB · dbt (dbt-duckdb) · Docker Compose · Terraform · GitHub Actions. Milestones are in ADR-002: Airflow by Nov 30, Redpanda for the ghost detector by Dec 15 (ADR-003). Iceberg only when an ADR-002 decision 5 trigger is hit. Don't add any of them earlier, and every new tool gets an ADR.
 
 ## Layout
 
 ```text
-ingest/          poller, fetch log, schema fingerprints (stream consumer later)
+ingest/          poller, fetch log, schema fingerprints; later the ghost detector (ADR-003)
 dbt/models/      bronze/ silver/ gold/
-dags/            Airflow DAGs (week 3)
+dags/            Airflow DAGs (by Nov 30)
 analysis/        statistics and findings notebooks
 dashboard/       Evidence or Streamlit
 infra/           Terraform
 tests/fixtures/  real snapshots recorded once, committed
 scripts/         one-off tools such as day1_probe.py
-docs/            SPEC.md, decisions/, runbook.md
+docs/            SPEC.md, decisions/, incidents/, runbook.md
 ```
 
 ## Commands
@@ -54,4 +55,4 @@ docs/            SPEC.md, decisions/, runbook.md
 
 ## Commits and PRs
 
-One PR per meaningful change. Each PR description says what changed, why, how it was tested, and which ADR it relates to.
+One PR per meaningful change. Each PR description says what changed, why, how it was tested, and which ADR it relates to. `main` is protected: work on a branch, and CI (`lint-and-test`) must pass before merge.
