@@ -8,6 +8,8 @@ terraform {
     }
   }
 
-  # Local state for now (terraform.tfstate, gitignored). Moving to an S3
-  # backend with native locking is a later step and gets its own ADR.
+  # State in S3 with native locking (ADR-004, decision 4). Settings come from
+  # the gitignored backend.hcl, so the account ID isn't committed:
+  #   terraform init -backend-config=backend.hcl
+  backend "s3" {}
 }

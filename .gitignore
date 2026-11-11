@@ -40,3 +40,6 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Terraform backend settings (contain the account ID); commit only the .example.
+backend.hcl

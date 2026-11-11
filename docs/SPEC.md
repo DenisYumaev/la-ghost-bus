@@ -75,7 +75,7 @@ GTFS static ───────┤                               │
         Airflow orchestrates · Terraform defines AWS · CI on every PR
 ```
 
-The census join and Metro's Equity Focus Communities map enter at the gold layer for the equity analysis. Bronze is compacted nightly: about 3,000 small snapshot files a day become one Parquet file per feed per service date, which keeps queries fast and S3 request costs low.
+The census join and Metro's Equity Focus Communities map enter at the gold layer for the equity analysis. Bronze is compacted nightly: each UTC day's small snapshot files for a feed are packed, byte-for-byte, into one Parquet file under a separate rebuildable `derived/` prefix, which keeps queries fast and S3 request costs low. The originals in `bronze/` are never moved or deleted (ADR-004, decision 2).
 
 | Component | Choice | Why | Rejected and why |
 | --- | --- | --- | --- |
@@ -98,7 +98,7 @@ Three layers, and only bronze is precious: everything downstream must be rebuild
 
 | Table | Grain | Key columns |
 | --- | --- | --- |
-| raw_fetch_log | One fetch attempt, success or failure | fetched_at, endpoint, http_status, latency_ms, bytes, error |
+| raw_fetch_log | One fetch attempt, success or failure | fetched_at, endpoint, http_status, latency_ms, bytes, error, content_hash, object_key, outcome (`written`, `duplicate`, `http_error`, `network_error`; ADR-004, decision 1) |
 | raw_vehicle_positions | One feed snapshot | fetched_at, feed_header_timestamp, payload, content_hash |
 | raw_trip_updates | One feed snapshot | same as above |
 | raw_cancellations | One API response | fetched_at, payload, content_hash, schema_fingerprint |
